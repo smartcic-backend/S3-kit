@@ -455,6 +455,9 @@ def test_presigned_post_rejects_invalid_sizes(provider, sizes):
         ("AccessDenied", AccessDeniedError),
         ("InvalidAccessKeyId", AccessDeniedError),
         ("SignatureDoesNotMatch", AccessDeniedError),
+        ("ExpiredToken", AccessDeniedError),
+        ("InvalidToken", AccessDeniedError),
+        ("RequestTimeTooSkewed", AccessDeniedError),
         ("403", AccessDeniedError),
         ("InternalError", S3KitError),
     ],
@@ -475,7 +478,7 @@ def test_client_errors_are_translated(provider, monkeypatch, code, expected):
         (EndpointConnectionError(endpoint_url="http://s3"), StorageConnectionError),
         (ConnectTimeoutError(endpoint_url="http://s3"), StorageConnectionError),
         (ReadTimeoutError(endpoint_url="http://s3"), StorageConnectionError),
-        (NoCredentialsError(), S3KitError),
+        (NoCredentialsError(), AccessDeniedError),
     ],
 )
 def test_botocore_errors_are_translated(provider, monkeypatch, error, expected):

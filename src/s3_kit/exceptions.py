@@ -14,7 +14,7 @@ class BucketNotFoundError(S3KitError):
 
 
 class AccessDeniedError(S3KitError):
-    """憑證無效或沒有權限。"""
+    """缺少憑證、憑證無效或過期，或沒有權限。"""
 
 
 class StorageConnectionError(S3KitError):

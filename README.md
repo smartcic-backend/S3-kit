@@ -336,7 +336,7 @@ S3-kit 會把 boto3 的例外轉成自己的例外，使用方不需要 import b
 |---|---|
 | `ObjectNotFoundError` | 指定的物件不存在 |
 | `BucketNotFoundError` | 設定的 bucket 不存在 |
-| `AccessDeniedError` | 憑證無效或沒有權限 |
+| `AccessDeniedError` | 缺少憑證、憑證無效或過期、用戶端時間偏差過大，或沒有權限 |
 | `StorageConnectionError` | 無法連線到 S3 服務、連線逾時，或下載到一半斷線 |
 | `S3KitError` | 其他無法歸類的錯誤 |
 

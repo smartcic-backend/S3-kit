@@ -50,7 +50,7 @@ class StorageConnectionError(S3KitError):
 |---|---|
 | `NoSuchKey`；`head_object` 的 `404`（bucket 存在時） | `ObjectNotFoundError` |
 | `NoSuchBucket`；`head_bucket` 的 `404` | `BucketNotFoundError` |
-| `AccessDenied`、`InvalidAccessKeyId`、`SignatureDoesNotMatch`、`403` | `AccessDeniedError` |
+| `AccessDenied`、`InvalidAccessKeyId`、`SignatureDoesNotMatch`、`ExpiredToken`、`InvalidToken`、`RequestTimeTooSkewed`、`403`；`NoCredentialsError` | `AccessDeniedError` |
 | `EndpointConnectionError`、`ConnectTimeoutError`、`ReadTimeoutError` | `StorageConnectionError` |
 | 其他 `ClientError`、`BotoCoreError` | `S3KitError` |
 

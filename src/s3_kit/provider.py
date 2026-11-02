@@ -12,6 +12,7 @@ from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     HTTPClientError,
+    NoCredentialsError,
 )
 from botocore.exceptions import (
     ConnectionError as BotoConnectionError,
@@ -38,6 +39,11 @@ _ACCESS_DENIED_CODES = {
     "AccessDenied",
     "InvalidAccessKeyId",
     "SignatureDoesNotMatch",
+    # 臨時憑證過期或無效
+    "ExpiredToken",
+    "InvalidToken",
+    # 用戶端時間與服務相差太多，簽名被拒絕
+    "RequestTimeTooSkewed",
     "403",
 }
 
@@ -99,6 +105,9 @@ def _translate_error(error: Exception, bucket: str, key: str | None) -> S3KitErr
             return BucketNotFoundError(bucket)
         if code in _ACCESS_DENIED_CODES:
             return AccessDeniedError(str(error))
+    # 省略金鑰且 boto3 預設的憑證來源也找不到憑證
+    if isinstance(error, NoCredentialsError):
+        return AccessDeniedError(str(error))
     if isinstance(error, (BotoConnectionError, HTTPClientError)):
         return StorageConnectionError(str(error))
     return S3KitError(str(error))
