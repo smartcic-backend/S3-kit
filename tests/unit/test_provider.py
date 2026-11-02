@@ -1,11 +1,32 @@
+import base64
 import io
+import json
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
-from botocore.exceptions import ClientError
+from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    NoCredentialsError,
+    ReadTimeoutError,
+)
 from moto import mock_aws
 
-from s3_kit import ObjectInfo, ObjectNotFoundError, S3Config, S3Provider
+from s3_kit import (
+    AccessDeniedError,
+    BucketNotFoundError,
+    ObjectInfo,
+    ObjectNotFoundError,
+    PresignedPost,
+    S3Config,
+    S3KitError,
+    S3Provider,
+    StorageConnectionError,
+)
 
 BUCKET = "test-bucket"
 MB = 1024 * 1024
@@ -24,6 +45,13 @@ class NonSeekableStream:
 def make_config(**overrides) -> S3Config:
     values = {"bucket": BUCKET, "access_key": "test", "secret_key": "test"}
     return S3Config(**{**values, **overrides})
+
+
+def raise_client_error(code: str):
+    def raise_error(**_):
+        raise ClientError({"Error": {"Code": code}}, "operation")
+
+    return raise_error
 
 
 @pytest.fixture
@@ -50,6 +78,50 @@ def test_ensure_bucket_supports_other_regions():
         assert provider.get_object("a.txt") == b"hello"
 
 
+def test_ensure_bucket_accepts_bucket_created_concurrently(provider, monkeypatch):
+    # 模擬檢查時 bucket 還不存在，建立時已被其他程序建立
+    monkeypatch.setattr(provider._client, "head_bucket", raise_client_error("404"))
+    monkeypatch.setattr(
+        provider._client,
+        "create_bucket",
+        raise_client_error("BucketAlreadyOwnedByYou"),
+    )
+
+    provider.ensure_bucket()
+
+
+def test_ensure_bucket_raises_when_bucket_owned_by_others(provider, monkeypatch):
+    monkeypatch.setattr(provider._client, "head_bucket", raise_client_error("404"))
+    monkeypatch.setattr(
+        provider._client, "create_bucket", raise_client_error("BucketAlreadyExists")
+    )
+
+    with pytest.raises(S3KitError) as info:
+        provider.ensure_bucket()
+
+    assert isinstance(info.value.__cause__, ClientError)
+
+
+def test_ensure_bucket_does_not_create_bucket_when_access_denied(provider, monkeypatch):
+    def fail_create_bucket(**_):
+        pytest.fail("沒有權限時不應嘗試建立 bucket")
+
+    monkeypatch.setattr(provider._client, "head_bucket", raise_client_error("403"))
+    monkeypatch.setattr(provider._client, "create_bucket", fail_create_bucket)
+
+    with pytest.raises(AccessDeniedError):
+        provider.ensure_bucket()
+
+
+def test_provider_does_not_use_default_session(monkeypatch):
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+
+    with mock_aws():
+        S3Provider(make_config())
+
+    assert boto3.DEFAULT_SESSION is None
+
+
 def test_put_and_get_object(provider):
     provider.put_object("a/b.txt", b"hello")
 
@@ -68,12 +140,18 @@ def test_get_object_raises_when_missing(provider):
         provider.get_object("missing.txt")
 
 
-def test_get_object_keeps_other_errors():
+def test_bucket_missing_raises_bucket_not_found():
     with mock_aws():
         provider = S3Provider(make_config())
 
-        with pytest.raises(ClientError):
+        with pytest.raises(BucketNotFoundError, match=BUCKET):
             provider.get_object("a.txt")
+        with pytest.raises(BucketNotFoundError):
+            provider.download_stream("a.txt")
+        with pytest.raises(BucketNotFoundError):
+            provider.get_info("a.txt")
+        with pytest.raises(BucketNotFoundError):
+            provider.exists("a.txt")
 
 
 def test_exists(provider):
@@ -251,3 +329,244 @@ def test_presigned_get_url_uses_path_style():
     assert url.startswith(f"http://localhost:9000/{BUCKET}/a/b.txt?")
     assert "X-Amz-Expires=60" in url
     assert "X-Amz-Signature=" in url
+
+
+def test_presigned_get_url_uses_public_endpoint():
+    with mock_aws():
+        provider = S3Provider(
+            make_config(
+                public_endpoint_url="http://public.example:9000", force_path_style=True
+            )
+        )
+        # 實際請求仍走 endpoint_url（moto 模擬的 AWS），不會連到對外位址
+        provider.ensure_bucket()
+        provider.put_object("a.txt", b"hello")
+
+        url = provider.presigned_get_url("a/b.txt", expires_in=60)
+
+        assert provider.get_object("a.txt") == b"hello"
+    assert url.startswith(f"http://public.example:9000/{BUCKET}/a/b.txt?")
+    assert "X-Amz-Signature=" in url
+
+
+def test_presigned_get_url_accepts_max_expires_in(provider):
+    url = provider.presigned_get_url("a.txt", expires_in=7 * 24 * 60 * 60)
+
+    assert "X-Amz-Expires=604800" in url
+
+
+@pytest.mark.parametrize("expires_in", [0, -1, 7 * 24 * 60 * 60 + 1])
+def test_presigned_get_url_rejects_invalid_expires_in(provider, expires_in):
+    with pytest.raises(ValueError, match="expires_in"):
+        provider.presigned_get_url("a.txt", expires_in=expires_in)
+
+
+def query_params(url: str) -> dict[str, list[str]]:
+    return parse_qs(urlsplit(url).query)
+
+
+def test_presigned_get_url_sets_download_name(provider):
+    url = provider.presigned_get_url("a/uuid.pdf", download_name="報告 1.pdf")
+
+    assert query_params(url)["response-content-disposition"] == [
+        "attachment; filename*=UTF-8''%E5%A0%B1%E5%91%8A%201.pdf"
+    ]
+
+
+def test_presigned_get_url_without_download_name(provider):
+    url = provider.presigned_get_url("a.txt")
+
+    assert "response-content-disposition" not in query_params(url)
+
+
+def decode_policy(post: PresignedPost) -> dict:
+    return json.loads(base64.b64decode(post.fields["policy"]))
+
+
+def test_presigned_post(provider):
+    post = provider.presigned_post(
+        "a/b.txt", expires_in=60, content_type="text/plain", max_size=10, min_size=1
+    )
+    policy = decode_policy(post)
+
+    assert post.fields["key"] == "a/b.txt"
+    assert post.fields["Content-Type"] == "text/plain"
+    assert ["content-length-range", 1, 10] in policy["conditions"]
+    assert {"Content-Type": "text/plain"} in policy["conditions"]
+    assert {"key": "a/b.txt"} in policy["conditions"]
+    assert {"bucket": BUCKET} in policy["conditions"]
+    expiration = datetime.strptime(policy["expiration"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    assert 0 < (expiration - datetime.now(timezone.utc)).total_seconds() <= 60
+
+
+def test_presigned_post_defaults(provider):
+    post = provider.presigned_post("a.txt")
+    policy = decode_policy(post)
+
+    assert "Content-Type" not in post.fields
+    assert ["content-length-range", 0, 5 * 1024 * 1024 * 1024] in policy["conditions"]
+    assert not any(
+        isinstance(condition, dict) and "Content-Type" in condition
+        for condition in policy["conditions"]
+    )
+
+
+def test_presigned_post_uses_public_endpoint():
+    provider = S3Provider(
+        make_config(
+            endpoint_url="http://rustfs:9000",
+            public_endpoint_url="http://public.example:9000",
+            force_path_style=True,
+        )
+    )
+
+    post = provider.presigned_post("a.txt")
+
+    assert post.url == f"http://public.example:9000/{BUCKET}"
+
+
+@pytest.mark.parametrize("expires_in", [0, 7 * 24 * 60 * 60 + 1])
+def test_presigned_post_rejects_invalid_expires_in(provider, expires_in):
+    with pytest.raises(ValueError, match="expires_in"):
+        provider.presigned_post("a.txt", expires_in=expires_in)
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        {"min_size": -1},
+        {"min_size": 11, "max_size": 10},
+        {"max_size": -1},
+        {"max_size": 5 * 1024 * 1024 * 1024 + 1},
+    ],
+)
+def test_presigned_post_rejects_invalid_sizes(provider, sizes):
+    with pytest.raises(ValueError, match="min_size"):
+        provider.presigned_post("a.txt", **sizes)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("NoSuchKey", ObjectNotFoundError),
+        ("NoSuchBucket", BucketNotFoundError),
+        ("AccessDenied", AccessDeniedError),
+        ("InvalidAccessKeyId", AccessDeniedError),
+        ("SignatureDoesNotMatch", AccessDeniedError),
+        ("403", AccessDeniedError),
+        ("InternalError", S3KitError),
+    ],
+)
+def test_client_errors_are_translated(provider, monkeypatch, code, expected):
+    monkeypatch.setattr(provider._client, "get_object", raise_client_error(code))
+
+    with pytest.raises(expected) as info:
+        provider.get_object("a.txt")
+
+    assert type(info.value) is expected
+    assert isinstance(info.value.__cause__, ClientError)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (EndpointConnectionError(endpoint_url="http://s3"), StorageConnectionError),
+        (ConnectTimeoutError(endpoint_url="http://s3"), StorageConnectionError),
+        (ReadTimeoutError(endpoint_url="http://s3"), StorageConnectionError),
+        (NoCredentialsError(), S3KitError),
+    ],
+)
+def test_botocore_errors_are_translated(provider, monkeypatch, error, expected):
+    def raise_error(**_):
+        raise error
+
+    monkeypatch.setattr(provider._client, "list_objects_v2", raise_error)
+
+    with pytest.raises(expected) as info:
+        list(provider.list_keys())
+
+    assert type(info.value) is expected
+    assert info.value.__cause__ is error
+
+
+def test_download_stream_translates_errors_during_iteration(provider, monkeypatch):
+    class BrokenBody:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def iter_chunks(self, _chunk_size):
+            yield b"first"
+            raise ReadTimeoutError(endpoint_url="http://s3")
+
+    monkeypatch.setattr(provider, "_open_object", lambda _key: BrokenBody())
+    chunks = provider.download_stream("a.txt")
+
+    assert next(chunks) == b"first"
+    with pytest.raises(StorageConnectionError):
+        next(chunks)
+
+
+def test_upload_stream_translates_wrapped_client_error(provider, monkeypatch):
+    # upload_fileobj 會把 ClientError 包成 S3UploadFailedError
+    def raise_upload_failed(*_, **__):
+        try:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+        except ClientError:
+            raise S3UploadFailedError("Failed to upload")
+
+    monkeypatch.setattr(provider._client, "upload_fileobj", raise_upload_failed)
+
+    with pytest.raises(AccessDeniedError):
+        provider.upload_stream("a.txt", io.BytesIO(b"hello"))
+
+
+def test_client_uses_connection_settings():
+    provider = S3Provider(
+        make_config(connect_timeout=2, read_timeout=5, max_attempts=3, verify=False)
+    )
+
+    config = provider._client.meta.config
+    assert config.connect_timeout == 2
+    assert config.read_timeout == 5
+    # max_attempts 含第一次請求，對應 botocore 的 total_max_attempts
+    assert config.retries == {"total_max_attempts": 3, "mode": "standard"}
+    assert provider._client._endpoint.http_session._verify is False
+
+
+def test_client_keeps_botocore_defaults():
+    provider = S3Provider(make_config())
+
+    config = provider._client.meta.config
+    assert config.connect_timeout == 60
+    assert config.read_timeout == 60
+    assert provider._client._endpoint.http_session._verify is True
+
+
+def test_client_uses_ca_bundle():
+    provider = S3Provider(make_config(verify="/etc/ssl/internal-ca.pem"))
+
+    assert provider._client._endpoint.http_session._verify == "/etc/ssl/internal-ca.pem"
+
+
+def test_provider_uses_default_credentials_when_keys_omitted(monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "env-access")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    provider = S3Provider(S3Config(bucket=BUCKET))
+
+    url = provider.presigned_get_url("a.txt")
+    assert query_params(url)["X-Amz-Credential"][0].startswith("env-access/")
+
+
+def test_provider_uses_session_token():
+    provider = S3Provider(make_config(session_token="my-token"))
+
+    url = provider.presigned_get_url("a.txt")
+    assert query_params(url)["X-Amz-Security-Token"] == ["my-token"]

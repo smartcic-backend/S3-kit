@@ -34,7 +34,7 @@ S3-kit 是一個 S3 儲存 Provider，用同一套 API 操作 AWS S3 及相容�
 - `examples/docker-compose.yaml`、`examples/Dockerfile`：用 Docker 啟動 RustFS 與範例 API
 - `.env.example`：環境變數範本，實際的 `.env` 不進版控
 - `tests/unit/`：單元測試，用 moto 模擬 S3，不需要 Docker
-- `tests/e2e/`：端對端測試，連線到範例的 RustFS，只使用 `s3-kit-e2e` bucket；測試不負責啟動或關閉容器
+- `tests/e2e/`：端對端測試，連線到範例的 RustFS，只寫入 `s3-kit-e2e` bucket；另外使用不存在的 `s3-kit-e2e-missing` bucket 測試 bucket 不存在的情況，測試不得建立它；測試不負責啟動或關閉容器
 
 ## 測試
 
@@ -44,7 +44,9 @@ S3-kit 是一個 S3 儲存 Provider，用同一套 API 操作 AWS S3 及相容�
 uv run pytest tests/unit
 ```
 
-執行 e2e 測試前，先啟動範例的 RustFS（見「連線方式」）。e2e 測試會在每個測試前後清空 `s3-kit-e2e` bucket：
+e2e 測試的目的是盡可能找出問題，除了正常流程，也要涵蓋錯誤情況（物件或 bucket 不存在、權限錯誤、連線失敗、違反預簽條件等），並驗證錯誤沒有留下副作用（例如被拒絕的上傳沒有存檔）。
+
+執行 e2e 測試前，先啟動範例的 RustFS（見「連線方式」）。e2e 測試會在每個測試前後清空 `s3-kit-e2e` bucket，並確認 `s3-kit-e2e-missing` bucket 不存在：
 
 ```bash
 uv run pytest tests/e2e

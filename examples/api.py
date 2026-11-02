@@ -15,7 +15,13 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Response, UploadFile
 
-from s3_kit import DirectoryListing, ObjectNotFoundError, S3Config, S3Provider
+from s3_kit import (
+    DirectoryListing,
+    ObjectNotFoundError,
+    PresignedPost,
+    S3Config,
+    S3Provider,
+)
 
 storage = S3Provider(S3Config.from_env())
 
@@ -68,3 +74,25 @@ def delete_file(key: str) -> None:
     if not storage.exists(key):
         raise HTTPException(status_code=404, detail="檔案不存在")
     storage.delete_object(key)
+
+
+@app.post("/presign/upload")
+def presign_upload(
+    key: str, content_type: str | None = None, max_size: int = 10 * 1024 * 1024
+) -> PresignedPost:
+    try:
+        return storage.presigned_post(
+            key, expires_in=600, content_type=content_type, max_size=max_size
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/presign/download/{key:path}")
+def presign_download(key: str) -> dict[str, str]:
+    if not storage.exists(key):
+        raise HTTPException(status_code=404, detail="檔案不存在")
+    url = storage.presigned_get_url(
+        key, expires_in=600, download_name=key.rsplit("/", 1)[-1]
+    )
+    return {"url": url}
