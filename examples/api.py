@@ -1,6 +1,6 @@
 """用 RustFS 實例提供檔案上傳、下載、刪除的 API。
 
-啟動方式：
+啟動方式（在 examples 資料夾執行）：
     docker compose up --build
 
 啟動後打開 http://localhost:8000/docs 操作 API。

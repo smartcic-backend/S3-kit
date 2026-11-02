@@ -42,7 +42,9 @@ def _error_code(error: ClientError) -> str:
 
 
 def _to_object_info(item: dict) -> ObjectInfo:
-    return ObjectInfo(key=item["Key"], size=item["Size"], last_modified=item["LastModified"])
+    return ObjectInfo(
+        key=item["Key"], size=item["Size"], last_modified=item["LastModified"]
+    )
 
 
 def _iter_chunks(body: StreamingBody, chunk_size: int) -> Iterator[bytes]:
@@ -88,7 +90,9 @@ class S3Provider:
                 CreateBucketConfiguration={"LocationConstraint": self._region},
             )
 
-    def put_object(self, key: str, data: bytes, content_type: str | None = None) -> None:
+    def put_object(
+        self, key: str, data: bytes, content_type: str | None = None
+    ) -> None:
         extra = {"ContentType": content_type} if content_type else {}
         self._client.put_object(Bucket=self._bucket, Key=key, Body=data, **extra)
 
@@ -165,7 +169,9 @@ class S3Provider:
         files: list[ObjectInfo] = []
 
         paginator = self._client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"):
+        for page in paginator.paginate(
+            Bucket=self._bucket, Prefix=prefix, Delimiter="/"
+        ):
             for item in page.get("CommonPrefixes", []):
                 folders.append(item["Prefix"].removeprefix(prefix))
             for item in page.get("Contents", []):
